@@ -390,11 +390,12 @@ async function generateQuiz(){
         : 'Generating…';
       render();
 
-      const avoidList = allQuestions.map(q => q.question).join(' | ');
+      // Keep the "avoid repeating" list short so it doesn't crowd out the prompt on later batches.
+      const avoidList = allQuestions.slice(-12).map(q => q.question).join(' | ');
       const prompt = `You write multiple-choice quiz questions. Based on the following ${sourceLabel}, write exactly ${count} multiple-choice questions.
 ${avoidList ? `Do not repeat or closely rephrase these already-used questions: ${avoidList}` : ''}
 
-Return ONLY a raw JSON array, no markdown fences, no commentary, in exactly this shape:
+Return ONLY a raw JSON array, no markdown fences, no commentary, no text before or after the array, in exactly this shape:
 [{"question":"...","options":["...","...","...","..."],"correctIndex":0,"explanation":"one short sentence"}]
 
 Rules:
@@ -409,23 +410,49 @@ ${sourceLabel.toUpperCase()}:
 ${context.slice(0, 6000)}
 """`;
 
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          messages: [{ role: "user", content: prompt }]
-        })
-      });
-      const data = await response.json();
-      const textBlock = (data.content || []).find(b => b.type === 'text');
-      if(!textBlock) throw new Error('No text in response');
-      let raw = textBlock.text.trim();
-      raw = raw.replace(/^```json/i,'').replace(/^```/,'').replace(/```$/,'').trim();
-      const parsed = JSON.parse(raw);
-      if(!Array.isArray(parsed) || !parsed.length) throw new Error('Empty batch');
-      allQuestions.push(...parsed);
+      let batchQuestions = null;
+      let lastErr = null;
+      // Try up to 3 times per batch before giving up on it.
+      for(let attempt = 0; attempt < 3 && !batchQuestions; attempt++){
+        try{
+          const response = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "claude-sonnet-4-6",
+              max_tokens: 1000,
+              messages: [{ role: "user", content: prompt }]
+            })
+          });
+          if(!response.ok){
+            throw new Error('HTTP ' + response.status);
+          }
+          const data = await response.json();
+          const textBlock = (data.content || []).find(x => x.type === 'text');
+          if(!textBlock) throw new Error('No text in response');
+          let raw = textBlock.text.trim();
+          raw = raw.replace(/^```json/i,'').replace(/^```/,'').replace(/```$/,'').trim();
+          // If the model added any stray text around the array, pull out just the [ ... ] block.
+          const match = raw.match(/\[[\s\S]*\]/);
+          if(match) raw = match[0];
+          const parsed = JSON.parse(raw);
+          if(!Array.isArray(parsed) || !parsed.length) throw new Error('Empty batch');
+          batchQuestions = parsed;
+        }catch(e){
+          lastErr = e;
+          if(attempt < 2) await new Promise(r => setTimeout(r, 600));
+        }
+      }
+      if(!batchQuestions){
+        // This batch never came back clean. Keep whatever we already have and stop here
+        // rather than throwing away earlier successful batches.
+        if(allQuestions.length){
+          break;
+        } else {
+          throw lastErr || new Error('Generation failed');
+        }
+      }
+      allQuestions.push(...batchQuestions);
     }
     AppState.questions = allQuestions;
     AppState.loading = false;
