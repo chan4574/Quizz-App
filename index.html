@@ -199,7 +199,129 @@ const AppState = {
   selected: {}, // index -> chosen option index
   confirmed: {}, // index -> bool
   score: 0,
+  readyText: '',
+  savedQuizId: null,
+  savedQuizName: '',
 };
+
+/* ---------------- SAVED QUIZZES (LOCAL OFFLINE STORAGE) ---------------- */
+const SAVED_QUIZZES_KEY = 'quiz-maker-saved-quizzes-v1';
+
+function getSavedQuizzes(){
+  try{
+    const data = JSON.parse(localStorage.getItem(SAVED_QUIZZES_KEY) || '[]');
+    return Array.isArray(data) ? data : [];
+  }catch(e){
+    return [];
+  }
+}
+
+function saveCurrentQuiz(){
+  if(!AppState.questions.length) return;
+
+  const existing = getSavedQuizzes();
+  const existingItem = AppState.savedQuizId
+    ? existing.find(x => x.id === AppState.savedQuizId)
+    : null;
+
+  const defaultName = existingItem?.name || 'Ready-made quiz ' +
+    new Date().toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
+  const name = prompt('Name this quiz:', defaultName);
+  if(name === null) return;
+
+  const cleanName = name.trim() || defaultName;
+  const id = AppState.savedQuizId || (Date.now().toString(36) + Math.random().toString(36).slice(2,8));
+
+  const item = {
+    id,
+    name: cleanName,
+    questions: JSON.parse(JSON.stringify(AppState.questions)),
+    savedAt: new Date().toISOString()
+  };
+
+  const index = existing.findIndex(x => x.id === id);
+  if(index >= 0) existing[index] = item;
+  else existing.unshift(item);
+
+  try{
+    localStorage.setItem(SAVED_QUIZZES_KEY, JSON.stringify(existing));
+    AppState.savedQuizId = id;
+    AppState.savedQuizName = cleanName;
+    AppState.error = '';
+    render();
+  }catch(e){
+    AppState.error = 'Could not save this quiz on this device. Your browser storage may be full or disabled.';
+    render();
+  }
+}
+
+function loadSavedQuiz(id){
+  const item = getSavedQuizzes().find(x => x.id === id);
+  if(!item) return;
+
+  AppState.questions = JSON.parse(JSON.stringify(item.questions));
+  AppState.savedQuizId = item.id;
+  AppState.savedQuizName = item.name;
+  AppState.phase = 'quiz';
+  AppState.error = '';
+  startQuiz();
+}
+
+function deleteSavedQuiz(id){
+  const item = getSavedQuizzes().find(x => x.id === id);
+  if(!item) return;
+  if(!confirm('Delete "' + item.name + '" from this device?')) return;
+
+  const remaining = getSavedQuizzes().filter(x => x.id !== id);
+  localStorage.setItem(SAVED_QUIZZES_KEY, JSON.stringify(remaining));
+
+  if(AppState.savedQuizId === id){
+    AppState.savedQuizId = null;
+    AppState.savedQuizName = '';
+  }
+  render();
+}
+
+function buildSavedQuizzes(){
+  const saved = getSavedQuizzes();
+  if(!saved.length) return null;
+
+  const card = el('div','card');
+  card.appendChild(el('label',null,'Saved quizzes — available offline'));
+
+  saved.forEach(item => {
+    const row = el('div','manual-q');
+    const info = el('span',null,
+      '<strong>' + escapeHtml(item.name) + '</strong><br>' +
+      '<span class="hint">' + item.questions.length + ' question(s)</span>');
+    const actions = el('div');
+    actions.style.display = 'flex';
+    actions.style.gap = '8px';
+
+    const open = el('button','btn btn-outline','Open');
+    open.style.padding = '7px 10px';
+    open.onclick = () => loadSavedQuiz(item.id);
+
+    const del = el('button','btn btn-outline','Delete');
+    del.style.padding = '7px 10px';
+    del.style.color = 'var(--red)';
+    del.onclick = () => deleteSavedQuiz(item.id);
+
+    actions.appendChild(open);
+    actions.appendChild(del);
+    row.appendChild(info);
+    row.appendChild(actions);
+    card.appendChild(row);
+  });
+
+  return card;
+}
+
+function escapeHtml(value){
+  return String(value).replace(/[&<>"']/g, ch => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[ch]));
+}
 
 function render(){
   const root = document.getElementById('app');
@@ -330,6 +452,8 @@ function buildSetup(){
       }
       AppState.error = '';
       AppState.questions = parsed;
+      AppState.savedQuizId = null;
+      AppState.savedQuizName = '';
       startQuiz();
     };
     card.appendChild(importReadyBtn);
@@ -379,6 +503,9 @@ function buildSetup(){
   card2.appendChild(btnRow);
   card2.appendChild(importInp);
   c.appendChild(card2);
+
+  const savedCard = buildSavedQuizzes();
+  if(savedCard) c.appendChild(savedCard);
 
   return c;
 }
@@ -633,7 +760,9 @@ function buildQuiz(){
   const i = AppState.current;
   const q = AppState.questions[i];
 
-  const prog = el('div','progress-line', `<span>Question ${i+1} of ${total}</span><span>${AppState.mode==='exam'?'Exam mode':'Practice mode'}</span>`);
+  const quizModeLabel = AppState.mode==='exam' ? 'Exam mode' : 'Practice mode';
+  const savedLabel = AppState.savedQuizId ? ' · Saved offline' : '';
+  const prog = el('div','progress-line', `<span>Question ${i+1} of ${total}</span><span>${quizModeLabel}${savedLabel}</span>`);
   c.appendChild(prog);
   const track = el('div','progress-track');
   const fill = el('div','progress-fill');
@@ -642,6 +771,19 @@ function buildQuiz(){
   c.appendChild(track);
 
   const card = el('div','card');
+
+  const saveRow = el('div');
+  saveRow.style.display = 'flex';
+  saveRow.style.justifyContent = 'flex-end';
+  saveRow.style.marginBottom = '12px';
+
+  const saveBtn = el('button','btn btn-outline',
+    AppState.savedQuizId ? '✓ Saved offline' : 'Save quiz offline');
+  saveBtn.style.padding = '7px 10px';
+  saveBtn.onclick = saveCurrentQuiz;
+  saveRow.appendChild(saveBtn);
+  card.appendChild(saveRow);
+
   card.appendChild(el('div','q-number','Q'+(i+1)));
   card.appendChild(el('p','q-text', q.question));
 
@@ -727,7 +869,8 @@ function buildResults(){
   const newQuiz = el('button','btn btn-outline','New quiz');
   newQuiz.onclick = ()=>{
     AppState.phase='setup'; AppState.questions=[]; AppState.error='';
-    AppState.pastedText=''; AppState.fileText=''; AppState.fileName=''; AppState.topic='';
+    AppState.savedQuizId=null; AppState.savedQuizName='';
+    AppState.pastedText=''; AppState.fileText=''; AppState.fileName=''; AppState.topic=''; AppState.readyText='';
     render();
   };
   btnRow.appendChild(retake); btnRow.appendChild(newQuiz);
