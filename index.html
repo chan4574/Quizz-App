@@ -232,7 +232,7 @@ function buildSetup(){
   const card = el('div','card');
 
   const tabs = el('div','tabs');
-  [['paste','Paste text'],['file','Upload .txt/.md'],['topic','Just a topic']].forEach(([key,label])=>{
+  [['paste','Paste text'],['file','Upload .txt/.md'],['topic','Just a topic'],['ready','Paste ready-made quiz']].forEach(([key,label])=>{
     const b = el('button','tab-btn'+(AppState.setupTab===key?' active':''), label);
     b.onclick = ()=>{ AppState.setupTab = key; render(); };
     tabs.appendChild(b);
@@ -270,6 +270,17 @@ function buildSetup(){
     }
     f.appendChild(el('div','hint','Plain text files only (.txt, .md). PDFs and Word docs aren\'t read in-browser — paste the text instead.'));
     card.appendChild(f);
+  } else if(AppState.setupTab === 'ready'){
+    const f = el('div','field');
+    f.appendChild(el('label',null,'Paste a quiz that already has questions, options, and correct answers marked'));
+    const ta = document.createElement('textarea');
+    ta.placeholder = '1. Question?\nA. Option\nB. Option ✅\nC. Option\nD. Option';
+    ta.style.minHeight = '160px';
+    ta.value = AppState.readyText || '';
+    ta.oninput = e => AppState.readyText = e.target.value;
+    f.appendChild(ta);
+    f.appendChild(el('div','hint','Works with numbered questions and A–D options where the correct one is marked with ✅, ✓, or "(correct)". No internet needed for this — it\'s just read directly, instantly.'));
+    card.appendChild(f);
   } else {
     const f = el('div','field');
     f.appendChild(el('label',null,'Topic'));
@@ -281,15 +292,17 @@ function buildSetup(){
     card.appendChild(f);
   }
 
-  const row = el('div','row');
-  const f1 = el('div','field');
-  f1.appendChild(el('label',null,'Number of questions (3–30)'));
-  const numInp = document.createElement('input');
-  numInp.type = 'number'; numInp.min=3; numInp.max=30; numInp.value = AppState.numQuestions;
-  numInp.oninput = e => AppState.numQuestions = Math.max(3, Math.min(30, parseInt(e.target.value)||6));
-  f1.appendChild(numInp);
-  row.appendChild(f1);
-  card.appendChild(row);
+  if(AppState.setupTab !== 'ready'){
+    const row = el('div','row');
+    const f1 = el('div','field');
+    f1.appendChild(el('label',null,'Number of questions (3–30)'));
+    const numInp = document.createElement('input');
+    numInp.type = 'number'; numInp.min=3; numInp.max=30; numInp.value = AppState.numQuestions;
+    numInp.oninput = e => AppState.numQuestions = Math.max(3, Math.min(30, parseInt(e.target.value)||6));
+    f1.appendChild(numInp);
+    row.appendChild(f1);
+    card.appendChild(row);
+  }
 
   const f2 = el('div','field');
   f2.appendChild(el('label',null,'Quiz mode'));
@@ -306,12 +319,28 @@ function buildSetup(){
     card.appendChild(el('div','error-box', AppState.error));
   }
 
-  const genBtn = el('button','btn btn-primary', AppState.loading ? `<span class="spinner"></span>${AppState.loadingLabel || 'Generating…'}` : 'Generate quiz with AI');
-  genBtn.disabled = AppState.loading;
-  genBtn.onclick = generateQuiz;
-  card.appendChild(genBtn);
-
-  card.appendChild(el('div','hint','Needs an internet connection for this step. Once generated, taking the quiz works fully offline — no more network calls.'));
+  if(AppState.setupTab === 'ready'){
+    const importReadyBtn = el('button','btn btn-primary','Import quiz');
+    importReadyBtn.onclick = ()=>{
+      const parsed = parseFormattedQuiz(AppState.readyText || '');
+      if(!parsed.length){
+        AppState.error = 'Couldn\'t find any questions in that text. Make sure each question is numbered (1., 2., ...) and options are labeled A–D, with the correct one marked.';
+        render();
+        return;
+      }
+      AppState.error = '';
+      AppState.questions = parsed;
+      startQuiz();
+    };
+    card.appendChild(importReadyBtn);
+    card.appendChild(el('div','hint','Runs instantly, fully offline — no AI call, so nothing to fail.'));
+  } else {
+    const genBtn = el('button','btn btn-primary', AppState.loading ? `<span class="spinner"></span>${AppState.loadingLabel || 'Generating…'}` : 'Generate quiz with AI');
+    genBtn.disabled = AppState.loading;
+    genBtn.onclick = generateQuiz;
+    card.appendChild(genBtn);
+    card.appendChild(el('div','hint','Needs an internet connection for this step. Once generated, taking the quiz works fully offline — no more network calls.'));
+  }
 
   c.appendChild(card);
 
@@ -352,6 +381,48 @@ function buildSetup(){
   c.appendChild(card2);
 
   return c;
+}
+
+/* ---------------- READY-MADE QUIZ PARSER ---------------- */
+function parseFormattedQuiz(raw){
+  const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(l => l.length);
+  const qRe = /^(\d{1,3})[\.\)]\s*(.+)/;
+  const optRe = /^([A-Da-d])[\.\)]\s*(.+)/;
+  const markers = ['✅','✔️','✔','✓'];
+
+  const questions = [];
+  let current = null;
+
+  function finalize(c){
+    if(!c || !c.question || c.options.length < 2) return null;
+    let correctIndex = c.options.findIndex(o => o.isCorrect);
+    if(correctIndex === -1) correctIndex = 0;
+    return { question: c.question, options: c.options.map(o => o.text), correctIndex, explanation: '' };
+  }
+
+  for(const line of lines){
+    const optMatch = line.match(optRe);
+    const qMatch = !optMatch ? line.match(qRe) : null;
+
+    if(qMatch){
+      const done = finalize(current);
+      if(done) questions.push(done);
+      current = { question: qMatch[2].trim(), options: [] };
+      continue;
+    }
+    if(optMatch && current){
+      let text = optMatch[2].trim();
+      let isCorrect = false;
+      for(const m of markers){
+        if(text.includes(m)){ isCorrect = true; text = text.split(m)[0].trim(); }
+      }
+      if(/\(correct\)/i.test(text)){ isCorrect = true; text = text.replace(/\(correct\)/i,'').trim(); }
+      if(text) current.options.push({ text, isCorrect });
+    }
+  }
+  const done = finalize(current);
+  if(done) questions.push(done);
+  return questions;
 }
 
 async function generateQuiz(){
