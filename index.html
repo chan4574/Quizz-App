@@ -161,6 +161,21 @@
   .manual-q button{background:none;border:none;color:var(--red);cursor:pointer;font-family:'Space Mono',monospace;font-size:.7rem;}
   .spinner{display:inline-block;width:14px;height:14px;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px;}
   @keyframes spin{to{transform:rotate(360deg);}}
+  .qnav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px;}
+  .qnav-item{
+    width:30px;height:30px;border-radius:8px;border:1px solid var(--paper-line);
+    background:#10141c;color:var(--ink-soft);font-family:'Space Mono',monospace;
+    font-size:.7rem;display:flex;align-items:center;justify-content:center;
+    cursor:pointer;flex:0 0 auto;
+  }
+  .qnav-item.current{border-color:var(--pencil);box-shadow:0 0 0 2px var(--glow);color:#fff;}
+  .qnav-item.done{background:var(--pencil);color:#fff;border-color:var(--pencil);}
+  .qnav-item.done.current{background:linear-gradient(135deg,#8b7cff,#6f61ed);}
+  .top-actions{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;}
+  .top-actions .btn{padding:7px 10px;font-size:.68rem;}
+  .resume-card{border:1px solid var(--pencil);box-shadow:0 0 0 3px var(--glow);}
+  .review-ans.skipped{color:var(--ink-soft);font-style:italic;}
+  .finish-link{display:block;text-align:center;margin-top:12px;}
 </style>
 </head>
 <body>
@@ -308,6 +323,80 @@ function escapeHtml(value){
   }[ch]));
 }
 
+/* ---------------- IN-PROGRESS QUIZ (AUTO-SAVED, RESUMABLE) ---------------- */
+const PROGRESS_KEY = 'quiz-maker-progress-v1';
+
+function saveProgress(){
+  try{
+    localStorage.setItem(PROGRESS_KEY, JSON.stringify({
+      questions: AppState.questions,
+      mode: AppState.mode,
+      current: AppState.current,
+      selected: AppState.selected,
+      confirmed: AppState.confirmed,
+      score: AppState.score,
+      savedQuizId: AppState.savedQuizId,
+      savedQuizName: AppState.savedQuizName,
+      updatedAt: new Date().toISOString()
+    }));
+  }catch(e){ /* storage unavailable — quiz still works, just won't resume after a restart */ }
+}
+
+function getProgress(){
+  try{
+    const data = JSON.parse(localStorage.getItem(PROGRESS_KEY));
+    return (data && Array.isArray(data.questions) && data.questions.length) ? data : null;
+  }catch(e){
+    return null;
+  }
+}
+
+function clearProgress(){
+  try{ localStorage.removeItem(PROGRESS_KEY); }catch(e){}
+}
+
+function resumeProgress(){
+  const p = getProgress();
+  if(!p) return;
+  AppState.questions = p.questions;
+  AppState.mode = p.mode || 'practice';
+  AppState.current = p.current || 0;
+  AppState.selected = p.selected || {};
+  AppState.confirmed = p.confirmed || {};
+  AppState.score = p.score || 0;
+  AppState.savedQuizId = p.savedQuizId || null;
+  AppState.savedQuizName = p.savedQuizName || '';
+  AppState.phase = 'quiz';
+  AppState.error = '';
+  render();
+}
+
+function buildResumeCard(){
+  const p = getProgress();
+  if(!p) return null;
+  const total = p.questions.length;
+  const answered = Object.keys(p.confirmed || {}).length;
+  const card = el('div','card resume-card');
+  card.appendChild(el('label',null,'Quiz in progress'));
+  const name = p.savedQuizName ? escapeHtml(p.savedQuizName) : 'Unsaved quiz';
+  card.appendChild(el('p',null, `<strong>${name}</strong><br><span class="hint">${answered} of ${total} question(s) answered</span>`));
+  const btnRow = el('div','btn-row');
+  btnRow.style.marginTop = '8px';
+  const cont = el('button','btn btn-primary','Continue');
+  cont.onclick = resumeProgress;
+  const discard = el('button','btn btn-outline','Discard');
+  discard.onclick = ()=>{
+    if(confirm('Discard this in-progress quiz? This can\'t be undone.')){
+      clearProgress();
+      render();
+    }
+  };
+  btnRow.appendChild(cont); btnRow.appendChild(discard);
+  card.appendChild(btnRow);
+  return card;
+}
+
+
 function render(){
   const root = document.getElementById('app');
   root.innerHTML = '';
@@ -315,6 +404,7 @@ function render(){
   if(AppState.phase === 'setup') root.appendChild(buildSetup());
   else if(AppState.phase === 'manual') root.appendChild(buildManual());
   else if(AppState.phase === 'quiz') root.appendChild(buildQuiz());
+  else if(AppState.phase === 'reviewPrompt') root.appendChild(buildReviewPrompt());
   else if(AppState.phase === 'results') root.appendChild(buildResults());
 }
 
@@ -335,6 +425,9 @@ function el(tag, cls, html){
 /* ---------------- SETUP ---------------- */
 function buildSetup(){
   const c = document.createElement('div');
+
+  const resumeCard = buildResumeCard();
+  if(resumeCard) c.appendChild(resumeCard);
 
   const card = el('div','card');
 
@@ -747,6 +840,7 @@ function buildManual(){
 
 /* ---------------- QUIZ ---------------- */
 function startQuiz(){
+  clearProgress();
   AppState.phase = 'quiz';
   AppState.current = 0;
   AppState.selected = {};
@@ -756,6 +850,8 @@ function startQuiz(){
 }
 
 function buildQuiz(){
+  saveProgress();
+
   const c = document.createElement('div');
   const total = AppState.questions.length;
   const i = AppState.current;
@@ -771,19 +867,32 @@ function buildQuiz(){
   track.appendChild(fill);
   c.appendChild(track);
 
+  // question navigator — jump to any question, answered or not
+  const qnav = el('div','qnav');
+  AppState.questions.forEach((_, idx) => {
+    const done = !!AppState.confirmed[idx];
+    const isCurrent = idx === i;
+    const item = el('div', 'qnav-item' + (done?' done':'') + (isCurrent?' current':''), String(idx+1));
+    item.onclick = ()=>{ AppState.current = idx; render(); };
+    qnav.appendChild(item);
+  });
+  c.appendChild(qnav);
+
   const card = el('div','card');
 
-  const saveRow = el('div');
-  saveRow.style.display = 'flex';
-  saveRow.style.justifyContent = 'flex-end';
-  saveRow.style.marginBottom = '12px';
-
+  const topActions = el('div','top-actions');
+  const restartLink = el('button','link-btn','Restart quiz');
+  restartLink.onclick = ()=>{
+    if(confirm('Restart from question 1? Your current answers will be cleared.')){
+      startQuiz();
+    }
+  };
   const saveBtn = el('button','btn btn-outline',
     AppState.savedQuizId ? '✓ Saved offline' : '💾 Save quiz offline');
-  saveBtn.style.padding = '7px 10px';
   saveBtn.onclick = saveCurrentQuiz;
-  saveRow.appendChild(saveBtn);
-  card.appendChild(saveRow);
+  topActions.appendChild(restartLink);
+  topActions.appendChild(saveBtn);
+  card.appendChild(topActions);
 
   card.appendChild(el('div','q-number','Q'+(i+1)));
   card.appendChild(el('p','q-text', q.question));
@@ -816,6 +925,16 @@ function buildQuiz(){
 
   const btnRow = el('div','btn-row');
   if(!isConfirmed){
+    const skipBtn = el('button','btn btn-outline','Skip for now');
+    skipBtn.onclick = ()=>{
+      if(i < total-1){
+        AppState.current++;
+      } else {
+        const firstUnanswered = AppState.questions.findIndex((_, idx) => !AppState.confirmed[idx]);
+        if(firstUnanswered !== -1) AppState.current = firstUnanswered;
+      }
+      render();
+    };
     const confirmBtn = el('button','btn btn-primary','Confirm answer');
     confirmBtn.disabled = chosen === undefined;
     confirmBtn.onclick = ()=>{
@@ -828,13 +947,23 @@ function buildQuiz(){
         render();
       }
     };
+    btnRow.appendChild(skipBtn);
     btnRow.appendChild(confirmBtn);
   } else if(AppState.mode === 'practice'){
     const nextBtn = el('button','btn btn-primary', i === total-1 ? 'See results' : 'Next question');
     nextBtn.onclick = goNext;
     btnRow.appendChild(nextBtn);
+  } else {
+    const nextBtn = el('button','btn btn-primary', i === total-1 ? 'Finish exam' : 'Next question');
+    nextBtn.onclick = goNext;
+    btnRow.appendChild(nextBtn);
   }
   card.appendChild(btnRow);
+
+  const finishLink = el('button','link-btn finish-link','Finish now & see results');
+  finishLink.onclick = attemptFinish;
+  card.appendChild(finishLink);
+
   c.appendChild(card);
   return c;
 }
@@ -844,13 +973,53 @@ function goNext(){
     AppState.current++;
     render();
   } else {
+    attemptFinish();
+  }
+}
+
+function attemptFinish(){
+  const unanswered = [];
+  AppState.questions.forEach((_, idx) => { if(!AppState.confirmed[idx]) unanswered.push(idx); });
+  if(unanswered.length === 0){
+    clearProgress();
     AppState.phase = 'results';
+    render();
+  } else {
+    AppState.unansweredList = unanswered;
+    AppState.phase = 'reviewPrompt';
     render();
   }
 }
 
+function buildReviewPrompt(){
+  const c = document.createElement('div');
+  const card = el('div','card center');
+  const n = AppState.unansweredList.length;
+  card.appendChild(el('label',null, `${n} question${n===1?'':'s'} still unanswered`));
+  card.appendChild(el('p',null, 'You can go back and answer them, or submit as-is — unanswered questions will count as incorrect.'));
+  const btnRow = el('div','btn-row');
+  btnRow.style.marginTop = '10px';
+  const reviewBtn = el('button','btn btn-primary','Review unanswered');
+  reviewBtn.onclick = ()=>{
+    AppState.current = AppState.unansweredList[0];
+    AppState.phase = 'quiz';
+    render();
+  };
+  const submitBtn = el('button','btn btn-outline','Submit anyway');
+  submitBtn.onclick = ()=>{
+    clearProgress();
+    AppState.phase = 'results';
+    render();
+  };
+  btnRow.appendChild(reviewBtn); btnRow.appendChild(submitBtn);
+  card.appendChild(btnRow);
+  c.appendChild(card);
+  return c;
+}
+
 /* ---------------- RESULTS ---------------- */
 function buildResults(){
+  clearProgress();
   const c = document.createElement('div');
   const total = AppState.questions.length;
   const score = AppState.score;
@@ -896,12 +1065,16 @@ function buildResults(){
     const item = el('div','review-item');
     item.appendChild(el('p','review-q', (i+1)+'. '+q.question));
     const chosen = AppState.selected[i];
-    const wasRight = chosen === q.correctIndex;
-    if(chosen !== undefined){
-      item.appendChild(el('p','review-ans '+(wasRight?'you-right':'you-wrong'), 'Your answer: '+q.options[chosen]));
-    }
-    if(!wasRight){
+    const isConfirmed = !!AppState.confirmed[i];
+    const wasRight = isConfirmed && chosen === q.correctIndex;
+    if(!isConfirmed){
+      item.appendChild(el('p','review-ans skipped','You didn\'t answer this one'));
       item.appendChild(el('p','review-ans correct-line','Correct answer: '+q.options[q.correctIndex]));
+    } else {
+      item.appendChild(el('p','review-ans '+(wasRight?'you-right':'you-wrong'), 'Your answer: '+q.options[chosen]));
+      if(!wasRight){
+        item.appendChild(el('p','review-ans correct-line','Correct answer: '+q.options[q.correctIndex]));
+      }
     }
     if(q.explanation) item.appendChild(el('p','explanation', q.explanation));
     reviewCard.appendChild(item);

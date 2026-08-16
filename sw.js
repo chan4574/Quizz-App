@@ -1,4 +1,4 @@
-const CACHE_NAME = 'quiz-maker-v7';
+const CACHE_NAME = 'quiz-maker-v8';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
