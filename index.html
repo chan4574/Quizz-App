@@ -283,10 +283,10 @@ function buildSetup(){
 
   const row = el('div','row');
   const f1 = el('div','field');
-  f1.appendChild(el('label',null,'Number of questions (3–8)'));
+  f1.appendChild(el('label',null,'Number of questions (3–30)'));
   const numInp = document.createElement('input');
-  numInp.type = 'number'; numInp.min=3; numInp.max=8; numInp.value = AppState.numQuestions;
-  numInp.oninput = e => AppState.numQuestions = Math.max(3, Math.min(8, parseInt(e.target.value)||6));
+  numInp.type = 'number'; numInp.min=3; numInp.max=30; numInp.value = AppState.numQuestions;
+  numInp.oninput = e => AppState.numQuestions = Math.max(3, Math.min(30, parseInt(e.target.value)||6));
   f1.appendChild(numInp);
   row.appendChild(f1);
   card.appendChild(row);
@@ -306,7 +306,7 @@ function buildSetup(){
     card.appendChild(el('div','error-box', AppState.error));
   }
 
-  const genBtn = el('button','btn btn-primary', AppState.loading ? '<span class="spinner"></span>Generating…' : 'Generate quiz with AI');
+  const genBtn = el('button','btn btn-primary', AppState.loading ? `<span class="spinner"></span>${AppState.loadingLabel || 'Generating…'}` : 'Generate quiz with AI');
   genBtn.disabled = AppState.loading;
   genBtn.onclick = generateQuiz;
   card.appendChild(genBtn);
@@ -368,11 +368,31 @@ async function generateQuiz(){
   }
 
   AppState.loading = true;
+  AppState.error = '';
   render();
 
   const n = AppState.numQuestions;
   const sourceLabel = AppState.setupTab === 'topic' ? 'topic' : 'source text';
-  const prompt = `You write multiple-choice quiz questions. Based on the following ${sourceLabel}, write exactly ${n} multiple-choice questions.
+  const BATCH_SIZE = 6; // keeps each AI response comfortably within its size limit
+  const batches = [];
+  let remaining = n;
+  while(remaining > 0){
+    batches.push(Math.min(BATCH_SIZE, remaining));
+    remaining -= BATCH_SIZE;
+  }
+
+  const allQuestions = [];
+  try{
+    for(let b = 0; b < batches.length; b++){
+      const count = batches[b];
+      AppState.loadingLabel = batches.length > 1
+        ? `Generating questions ${allQuestions.length+1}–${allQuestions.length+count} of ${n}…`
+        : 'Generating…';
+      render();
+
+      const avoidList = allQuestions.map(q => q.question).join(' | ');
+      const prompt = `You write multiple-choice quiz questions. Based on the following ${sourceLabel}, write exactly ${count} multiple-choice questions.
+${avoidList ? `Do not repeat or closely rephrase these already-used questions: ${avoidList}` : ''}
 
 Return ONLY a raw JSON array, no markdown fences, no commentary, in exactly this shape:
 [{"question":"...","options":["...","...","...","..."],"correctIndex":0,"explanation":"one short sentence"}]
@@ -389,30 +409,36 @@ ${sourceLabel.toUpperCase()}:
 ${context.slice(0, 6000)}
 """`;
 
-  try{
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1000,
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-    const data = await response.json();
-    const textBlock = (data.content || []).find(b => b.type === 'text');
-    if(!textBlock) throw new Error('No text in response');
-    let raw = textBlock.text.trim();
-    raw = raw.replace(/^```json/i,'').replace(/^```/,'').replace(/```$/,'').trim();
-    const parsed = JSON.parse(raw);
-    if(!Array.isArray(parsed) || !parsed.length) throw new Error('Empty quiz');
-    AppState.questions = parsed;
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          messages: [{ role: "user", content: prompt }]
+        })
+      });
+      const data = await response.json();
+      const textBlock = (data.content || []).find(b => b.type === 'text');
+      if(!textBlock) throw new Error('No text in response');
+      let raw = textBlock.text.trim();
+      raw = raw.replace(/^```json/i,'').replace(/^```/,'').replace(/```$/,'').trim();
+      const parsed = JSON.parse(raw);
+      if(!Array.isArray(parsed) || !parsed.length) throw new Error('Empty batch');
+      allQuestions.push(...parsed);
+    }
+    AppState.questions = allQuestions;
     AppState.loading = false;
     startQuiz();
   }catch(err){
     AppState.loading = false;
-    AppState.error = 'Could not generate a quiz right now. Check your connection and try again, or build one manually below.';
-    render();
+    if(allQuestions.length){
+      AppState.questions = allQuestions;
+      startQuiz();
+    } else {
+      AppState.error = 'Could not generate a quiz right now. Check your connection and try again, or build one manually below.';
+      render();
+    }
   }
 }
 
