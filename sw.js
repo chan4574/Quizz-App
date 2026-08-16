@@ -19,7 +19,6 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // Never cache/intercept calls to the Anthropic API - those need the network.
   if (url.hostname.includes('anthropic.com')) return;
 
   event.respondWith(
